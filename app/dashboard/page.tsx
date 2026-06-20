@@ -22,14 +22,16 @@ const DashboardCharts = dynamic(() => import('@/components/DashboardCharts'), {
 });
 
 /**
- * Represents a single carbon footprint entry in the dashboard.
+ * Represents a single daily aggregated carbon footprint entry in the dashboard.
+ * Used for the area chart rendering.
  */
 interface CarbonEntry {
-  id: string;
-  category: string;
-  value: number;
   date: string;
-  description?: string;
+  CO2: number;
+  Transport: number;
+  Energy: number;
+  Food: number;
+  Waste: number;
 }
 
 /**

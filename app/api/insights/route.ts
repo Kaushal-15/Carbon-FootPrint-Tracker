@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { FootprintEntry } from '@prisma/client';
 
 export const dynamic = 'force-dynamic';
 
@@ -59,10 +60,10 @@ export async function GET(req: Request) {
     // 3. Fallback static recommendation generator (if Groq fails or no key)
     /**
      * Fallback recommendations generator in case the external API fails.
-     * @param {Array<{category: string, value: number, description?: string | null}>} entries - The footprint entries.
+     * @param {FootprintEntry[]} entries - The footprint entries.
      * @returns {string} Formatted markdown recommendations.
      */
-    const generateFallbackRecommendations = (entries: {category: string, value: number, description?: string | null}[]) => {
+    const generateFallbackRecommendations = (entries: FootprintEntry[]) => {
       if (entries.length === 0) {
         return "Log your daily footprint categories so EcoTrace can analyze your patterns and generate tailored insights.";
       }
