@@ -1,5 +1,9 @@
 import { prisma } from './prisma';
-import { calculateTotalEntryEmission } from './carbonCalculator';
+import type { FootprintEntry } from '@prisma/client';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface GamificationResult {
   pointsEarned: number;
@@ -8,217 +12,261 @@ interface GamificationResult {
   completedChallenges: string[];
 }
 
+type EntryLike = Pick<
+  FootprintEntry,
+  'transportMode' | 'foodDietType' | 'wasteVolume' | 'wasteRecycled' | 'electricityUsage' | 'co2Emission'
+>;
+
+interface UserWithGamificationData {
+  id: string;
+  streak: number;
+  lastLoggedAt: Date | null;
+  entries: FootprintEntry[];
+  badges: { badge: { name: string } }[];
+  challenges: { id: string; challenge: { title: string; pointsReward: number } }[];
+}
+
+// ---------------------------------------------------------------------------
+// Tunable constants (previously magic numbers scattered through the logic)
+// ---------------------------------------------------------------------------
+
+const POINTS = {
+  DAILY_LOG: 10,
+  BADGE_UNLOCK: 50,
+} as const;
+
+const STREAK_BADGE_THRESHOLD = 7;
+const CARBON_CUTTER_REDUCTION = 0.9; // unlock if new entry <= 90% of recent average
+const CARBON_CUTTER_MIN_HISTORY = 3;
+
+const CLEAN_COMMUTE_MODES = ['WALK', 'BIKE', 'TRAIN', 'BUS', 'NONE'];
+const SAFE_DIETS = ['VEGAN', 'VEGETARIAN'];
+const ACTIVE_COMMUTE_MODES = ['WALK', 'BIKE'];
+
+// ---------------------------------------------------------------------------
+// Badge rules — each rule is a pure predicate over (newEntry, pastEntries).
+// Adding a new badge means adding one entry here, not a new if-block.
+// ---------------------------------------------------------------------------
+
+interface BadgeRule {
+  name: string;
+  isUnlocked: (newEntry: EntryLike, pastEntries: EntryLike[], streak: number) => boolean;
+}
+
+const BADGE_RULES: BadgeRule[] = [
+  {
+    name: 'Eco Warrior',
+    isUnlocked: (_e, _p, streak) => streak >= STREAK_BADGE_THRESHOLD,
+  },
+  {
+    name: 'Zero Waste Champion',
+    isUnlocked: (e) => e.wasteVolume === 'LOW' && e.wasteRecycled === true,
+  },
+  {
+    name: 'Green Commuter',
+    isUnlocked: (e, past) => hasCleanStreak([e, ...past], 'transportMode', CLEAN_COMMUTE_MODES, 5, 3),
+  },
+  {
+    name: 'Conscious Consumer',
+    isUnlocked: (e, past) => hasCleanStreak([e, ...past], 'foodDietType', SAFE_DIETS, 5, 3, true),
+  },
+  {
+    name: 'Carbon Cutter',
+    isUnlocked: (e, past) => {
+      if (past.length < CARBON_CUTTER_MIN_HISTORY) return false;
+      const avg = past.reduce((sum, p) => sum + p.co2Emission, 0) / past.length;
+      return e.co2Emission <= avg * CARBON_CUTTER_REDUCTION;
+    },
+  },
+];
+
 /**
- * Process a new footprint entry to update points, streaks, badges, and challenges.
+ * Checks whether the most recent `windowSize` entries (out of `entries`, newest first)
+ * all match one of `allowedValues` for the given field. Requires at least `minCount`
+ * entries to be present to qualify (avoids unlocking on day one with too little data).
+ * `requireValue` controls whether a null/missing field counts as "clean" (commute: yes,
+ * diet: no — you can't be a Conscious Consumer by simply not logging food).
  */
+function hasCleanStreak<T extends Record<string, unknown>>(
+  entries: T[],
+  field: keyof T,
+  allowedValues: string[],
+  windowSize: number,
+  minCount: number,
+  requireValue = false
+): boolean {
+  const window = entries.slice(0, windowSize);
+  if (window.length < minCount) return false;
+
+  return window.every((entry) => {
+    const value = entry[field];
+    if (!value) return !requireValue;
+    return allowedValues.includes(String(value).toUpperCase());
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Challenge rules — same data-driven pattern as badges, keyed by challenge title
+// so they line up with whatever's seeded in the database.
+// ---------------------------------------------------------------------------
+
+interface ChallengeRule {
+  title: string;
+  isCompleted: (newEntry: EntryLike, pastEntries: EntryLike[]) => boolean;
+}
+
+const CHALLENGE_RULES: ChallengeRule[] = [
+  {
+    title: 'Meat-Free Week',
+    isCompleted: (e, past) => hasCleanStreak([e, ...past], 'foodDietType', SAFE_DIETS, 7, 7, true),
+  },
+  {
+    title: 'Active Commuting',
+    isCompleted: (e, past) => hasCleanStreak([e, ...past], 'transportMode', ACTIVE_COMMUTE_MODES, 5, 5),
+  },
+  {
+    title: 'Unplugged Weekend',
+    isCompleted: (e, past) => {
+      const window = [e, ...past].slice(0, 2);
+      if (window.length < 2) return false;
+      return window.every((entry) => typeof entry.electricityUsage === 'number' && entry.electricityUsage < 5);
+    },
+  },
+  {
+    title: 'Zero Single-Use Waste',
+    isCompleted: (e, past) => {
+      const window = [e, ...past].slice(0, 7);
+      if (window.length < 7) return false;
+      return window.every((entry) => entry.wasteVolume === 'LOW' && entry.wasteRecycled === true);
+    },
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Streak calculation — isolated so it's independently testable
+// ---------------------------------------------------------------------------
+
+function toCalendarDay(date: Date): number {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+/**
+ * Computes the user's updated streak given the timestamp of the new entry
+ * and their previous streak/lastLoggedAt state. Pure function, no DB access.
+ */
+export function calculateUpdatedStreak(
+  newTimestamp: Date,
+  previousStreak: number,
+  lastLoggedAt: Date | null
+): number {
+  if (!lastLoggedAt) return 1; // first log ever
+
+  const daysBetween = Math.round(
+    (toCalendarDay(newTimestamp) - toCalendarDay(lastLoggedAt)) / (1000 * 60 * 60 * 24)
+  );
+
+  if (daysBetween === 0) return previousStreak; // same calendar day, unchanged
+  if (daysBetween === 1) return previousStreak + 1; // consecutive day
+  return 1; // streak broken (or backdated entry) — restart
+}
+
+// ---------------------------------------------------------------------------
+// Badge/challenge evaluation — small, focused, each does exactly one thing
+// ---------------------------------------------------------------------------
+
+async function unlockBadge(
+  userId: string,
+  badgeName: string,
+  alreadyUnlocked: Set<string>,
+  result: GamificationResult
+): Promise<void> {
+  if (alreadyUnlocked.has(badgeName)) return;
+
+  const badge = await prisma.badge.findUnique({ where: { name: badgeName } });
+  if (!badge) return;
+
+  await prisma.userBadge.create({ data: { userId, badgeId: badge.id } });
+  result.newBadges.push(badgeName);
+  result.pointsEarned += POINTS.BADGE_UNLOCK;
+}
+
+async function evaluateBadges(
+  user: UserWithGamificationData,
+  newEntry: EntryLike,
+  newStreak: number,
+  result: GamificationResult
+): Promise<void> {
+  const existingBadgeNames = new Set(user.badges.map((ub) => ub.badge.name));
+
+  if (!user.lastLoggedAt) {
+    await unlockBadge(user.id, 'First Step', existingBadgeNames, result);
+  }
+
+  for (const rule of BADGE_RULES) {
+    if (rule.isUnlocked(newEntry, user.entries, newStreak)) {
+      await unlockBadge(user.id, rule.name, existingBadgeNames, result);
+    }
+  }
+}
+
+async function evaluateChallenges(
+  user: UserWithGamificationData,
+  newEntry: EntryLike,
+  result: GamificationResult
+): Promise<void> {
+  for (const userChallenge of user.challenges) {
+    const rule = CHALLENGE_RULES.find((r) => r.title === userChallenge.challenge.title);
+    if (!rule || !rule.isCompleted(newEntry, user.entries)) continue;
+
+    await prisma.userChallenge.update({
+      where: { id: userChallenge.id },
+      data: { status: 'COMPLETED', completedAt: new Date() },
+    });
+
+    result.completedChallenges.push(userChallenge.challenge.title);
+    result.pointsEarned += userChallenge.challenge.pointsReward;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point — orchestrates the steps above. Each step is independently
+// readable and testable; this function just sequences them.
+// ---------------------------------------------------------------------------
+
 export async function processGamification(
   userId: string,
-  newEntry: {
-    timestamp: Date;
-    transportMode?: string | null;
-    transportDistance?: number | null;
-    electricityUsage?: number | null;
-    heatingSource?: string | null;
-    heatingUsage?: number | null;
-    foodDietType?: string | null;
-    wasteVolume?: string | null;
-    wasteRecycled?: boolean | null;
-    co2Emission: number;
-  }
+  newEntry: EntryLike & { timestamp: Date }
 ): Promise<GamificationResult> {
-  const result: GamificationResult = {
-    pointsEarned: 0,
-    streakUpdated: 0,
-    newBadges: [],
-    completedChallenges: [],
-  };
-
-  // 1. Fetch User details, past entries, badges, and active challenges
   const user = await prisma.user.findUnique({
     where: { id: userId },
     include: {
-      entries: {
-        orderBy: { timestamp: 'desc' },
-        take: 10,
-      },
-      badges: {
-        include: { badge: true },
-      },
-      challenges: {
-        where: { status: 'ACTIVE' },
-        include: { challenge: true },
-      },
+      entries: { orderBy: { timestamp: 'desc' }, take: 10 },
+      badges: { include: { badge: true } },
+      challenges: { where: { status: 'ACTIVE' }, include: { challenge: true } },
     },
   });
 
   if (!user) throw new Error('User not found');
 
-  const existingBadgeNames = new Set(user.badges.map((ub) => ub.badge.name));
-  const pastEntries = user.entries; // sorted desc, so pastEntries[0] is the *previous* newest entry (if we haven't committed the new one yet)
-  
-  // Define helper to unlock a badge
-  const unlockBadge = async (badgeName: string) => {
-    if (existingBadgeNames.has(badgeName)) return;
-    const badge = await prisma.badge.findUnique({ where: { name: badgeName } });
-    if (badge) {
-      await prisma.userBadge.create({
-        data: {
-          userId,
-          badgeId: badge.id,
-        },
-      });
-      result.newBadges.push(badgeName);
-      result.pointsEarned += 50; // 50 points bonus for any badge unlocked!
-    }
+  const result: GamificationResult = {
+    pointsEarned: POINTS.DAILY_LOG,
+    streakUpdated: 0,
+    newBadges: [],
+    completedChallenges: [],
   };
 
-  // 2. Streaks and Base Logging Points
-  let newStreak = user.streak;
-  const now = new Date(newEntry.timestamp);
-  
-  if (!user.lastLoggedAt) {
-    // First log ever
-    newStreak = 1;
-    await unlockBadge('First Step');
-  } else {
-    const lastLoggedDate = new Date(user.lastLoggedAt);
-    
-    // Reset hours to compare calendar days
-    const d1 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const d2 = new Date(lastLoggedDate.getFullYear(), lastLoggedDate.getMonth(), lastLoggedDate.getDate());
-    
-    const diffTime = Math.abs(d1.getTime() - d2.getTime());
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    
-    if (diffDays === 1) {
-      // Logged on the consecutive day
-      newStreak += 1;
-    } else if (diffDays > 1) {
-      // Streak broken
-      newStreak = 1;
-    }
-    // If diffDays === 0, same day, streak doesn't change
-  }
-
+  const newStreak = calculateUpdatedStreak(newEntry.timestamp, user.streak, user.lastLoggedAt);
   result.streakUpdated = newStreak;
-  result.pointsEarned += 10; // 10 points for daily log
 
-  // Check for Eco Warrior badge (7-day streak)
-  if (newStreak >= 7) {
-    await unlockBadge('Eco Warrior');
-  }
+  await evaluateBadges(user, newEntry, newStreak, result);
+  await evaluateChallenges(user, newEntry, result);
 
-  // 3. Custom Badge Triggers
-  
-  // A. Zero Waste Champion
-  // Condition: wasteVolume is LOW and wasteRecycled is true
-  if (newEntry.wasteVolume === 'LOW' && newEntry.wasteRecycled === true) {
-    await unlockBadge('Zero Waste Champion');
-  }
-
-  // B. Green Commuter
-  // Condition: the last 5 entries had only clean commute (WALK, BIKE, TRAIN, BUS or no commute)
-  const cleanCommutes = ['WALK', 'BIKE', 'TRAIN', 'BUS', null, 'NONE'];
-  const lastEntriesForCommute = [newEntry, ...pastEntries].slice(0, 5);
-  const allCleanCommute = lastEntriesForCommute.every(
-    (e) => !e.transportMode || cleanCommutes.includes(e.transportMode.toUpperCase())
-  );
-  if (allCleanCommute && lastEntriesForCommute.length >= 3) {
-    await unlockBadge('Green Commuter');
-  }
-
-  // C. Conscious Consumer
-  // Condition: last 5 entries had VEGAN or VEGETARIAN diet
-  const safeDiets = ['VEGAN', 'VEGETARIAN'];
-  const lastEntriesForFood = [newEntry, ...pastEntries].slice(0, 5);
-  const allSafeFood = lastEntriesForFood.every(
-    (e) => e.foodDietType && safeDiets.includes(e.foodDietType.toUpperCase())
-  );
-  if (allSafeFood && lastEntriesForFood.length >= 3) {
-    await unlockBadge('Conscious Consumer');
-  }
-
-  // D. Carbon Cutter (10% reduction)
-  // Compare this entry emissions to user average (if they have at least 3 previous entries)
-  if (pastEntries.length >= 3) {
-    const sumEmissions = pastEntries.reduce((sum, e) => sum + e.co2Emission, 0);
-    const avgEmission = sumEmissions / pastEntries.length;
-    if (newEntry.co2Emission <= avgEmission * 0.90) {
-      await unlockBadge('Carbon Cutter');
-    }
-  }
-
-  // 4. Update Challenges
-  // Check if any active challenges are met
-  for (const uc of user.challenges) {
-    const challenge = uc.challenge;
-    let completed = false;
-
-    // Check progress for Meat-Free Week
-    if (challenge.title === 'Meat-Free Week') {
-      const foodEntries = [newEntry, ...pastEntries].slice(0, 7);
-      const isMeatFree = foodEntries.every(
-        (e) => e.foodDietType === 'VEGAN' || e.foodDietType === 'VEGETARIAN'
-      );
-      if (isMeatFree && foodEntries.length >= 7) {
-        completed = true;
-      }
-    }
-
-    // Check progress for Active Commuting
-    if (challenge.title === 'Active Commuting') {
-      const activeCommutes = ['WALK', 'BIKE'];
-      const travelEntries = [newEntry, ...pastEntries].slice(0, 5);
-      const isActive = travelEntries.every(
-        (e) => !e.transportMode || activeCommutes.includes(e.transportMode.toUpperCase())
-      );
-      if (isActive && travelEntries.length >= 5) {
-        completed = true;
-      }
-    }
-
-    // Check progress for Unplugged Weekend
-    if (challenge.title === 'Unplugged Weekend') {
-      const energyEntries = [newEntry, ...pastEntries].slice(0, 2);
-      const isLowEnergy = energyEntries.every(
-        (e) => typeof e.electricityUsage === 'number' && e.electricityUsage < 5
-      );
-      if (isLowEnergy && energyEntries.length >= 2) {
-        completed = true;
-      }
-    }
-
-    // Check progress for Zero Single-Use Waste
-    if (challenge.title === 'Zero Single-Use Waste') {
-      const wasteEntries = [newEntry, ...pastEntries].slice(0, 7);
-      const isZeroWaste = wasteEntries.every(
-        (e) => e.wasteVolume === 'LOW' && e.wasteRecycled === true
-      );
-      if (isZeroWaste && wasteEntries.length >= 7) {
-        completed = true;
-      }
-    }
-
-    if (completed) {
-      await prisma.userChallenge.update({
-        where: { id: uc.id },
-        data: {
-          status: 'COMPLETED',
-          completedAt: new Date(),
-        },
-      });
-      result.completedChallenges.push(challenge.title);
-      result.pointsEarned += challenge.pointsReward;
-    }
-  }
-
-  // 5. Save updated user profile metrics
   await prisma.user.update({
     where: { id: userId },
     data: {
       points: { increment: result.pointsEarned },
       streak: newStreak,
-      lastLoggedAt: now,
+      lastLoggedAt: newEntry.timestamp,
     },
   });
 
