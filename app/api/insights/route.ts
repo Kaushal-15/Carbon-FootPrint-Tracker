@@ -2,51 +2,12 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
-import { FootprintEntry } from '@prisma/client';
+import { generateFallbackRecommendations } from '@/lib/insightsFallback';
 
 export const dynamic = 'force-dynamic';
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Fallback recommendations generator used when Groq is unavailable, unconfigured,
- * or fails. Moved to module scope so it's defined once per process, not once
- * per request, and so it can be unit tested independently of the route handler.
- *
- * Note: "trans" here is a rough proxy score for transport+energy load, not a
- * literal transport-only figure — electricity usage is folded in as a stand-in
- * signal since both correlate with "high household energy/travel demand".
- * @param entries The footprint entries.
- * @returns Formatted markdown recommendation string.
- */
-export function generateFallbackRecommendations(entries: FootprintEntry[]): string {
-  if (entries.length === 0) {
-    return 'Log your daily footprint categories so EcoTrace can analyze your patterns and generate tailored insights.';
-  }
-
-  // Calculate simple proxy scores to find the biggest contributor category
-  let transportEnergyScore = 0;
-  let foodScore = 0;
-  let wasteScore = 0;
-
-  entries.forEach((e) => {
-    if (e.transportMode && e.transportMode !== 'WALK' && e.transportMode !== 'BIKE') {
-      transportEnergyScore += e.transportDistance ?? 0;
-    }
-    transportEnergyScore += e.electricityUsage ?? 0; // energy demand folded into the same proxy
-    if (e.foodDietType === 'MEAT_HEAVY' || e.foodDietType === 'MEAT_MEDIUM') foodScore += 10;
-    if (e.wasteVolume === 'HIGH') wasteScore += 10;
-  });
-
-  if (transportEnergyScore >= foodScore && transportEnergyScore >= wasteScore) {
-    return '🌱 **EcoTrace Transport Insight**\n- Commute patterns: You travel frequently by passenger car. Consider carpooling or switching to local public transit for journeys over 5 km.\n- Active travel: For distances under 3 km, walking or cycling can reduce your transport footprint to zero and boost daily fitness!';
-  }
-  if (foodScore >= transportEnergyScore && foodScore >= wasteScore) {
-    return '🥗 **EcoTrace Food Insight**\n- Plant-based transition: High meat consumption is your biggest driver. Replacing red meat with poultry, fish, or legumes for just 3 days a week can cut food emissions by 30%.\n- Meal preps: Planning meals ahead reduces food waste, saving energy and footprint simultaneously.';
-  }
-  return '♻️ **EcoTrace Waste Insight**\n- Active recycling: Check local recycling guidelines to ensure paper, metal, and glass bypass landfills, which reduces waste emissions by 50%.\n- Smart shopping: Purchase bulk quantities and avoid single-use packaging to decrease initial waste volume.';
-}
 
 export async function GET(req: Request) {
   try {
@@ -81,12 +42,10 @@ export async function GET(req: Request) {
       const timeSinceUpdate = now.getTime() - new Date(user.insightsUpdatedAt).getTime();
 
       if (!forceRefresh && timeSinceUpdate < TWENTY_FOUR_HOURS_MS) {
-        // Return cached recommendations directly
         return NextResponse.json({ recommendations: user.cachedInsights }, { status: 200 });
       }
 
       if (forceRefresh && timeSinceUpdate < FIVE_MINUTES_MS) {
-        // Rate limit manual refreshes to once every 5 minutes
         return NextResponse.json(
           {
             recommendations: user.cachedInsights,
