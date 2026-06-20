@@ -1,0 +1,84 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String             @id @default(uuid())
+  name         String
+  email        String             @unique
+  password     String
+  points       Int                @default(0)
+  streak       Int                @default(0)
+  lastLoggedAt      DateTime?
+  cachedInsights    String?
+  insightsUpdatedAt DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  entries      FootprintEntry[]
+  badges       UserBadge[]
+  challenges   UserChallenge[]
+}
+
+model FootprintEntry {
+  id                String   @id @default(uuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  timestamp         DateTime
+  transportMode     String?  // CAR, BUS, TRAIN, BIKE, WALK, FLIGHT
+  transportDistance Float?   // in km
+  electricityUsage  Float?   // in kWh
+  heatingSource     String?  // GAS, ELECTRIC, OIL, NONE
+  heatingUsage      Float?   // in kWh
+  foodDietType      String?  // VEGAN, VEGETARIAN, PESCATARIAN, MEAT_HEAVY, MEAT_MEDIUM
+  wasteVolume       String?  // LOW, MEDIUM, HIGH
+  wasteRecycled     Boolean?
+  co2Emission       Float    // calculated total CO2 in kg
+  createdAt         DateTime @default(now())
+}
+
+model Badge {
+  id          String      @id @default(uuid())
+  name        String      @unique
+  description String
+  icon        String      // e.g. emoji or icon name
+  users       UserBadge[]
+}
+
+model UserBadge {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badgeId    String
+  badge      Badge    @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  unlockedAt DateTime @default(now())
+
+  @@unique([userId, badgeId])
+}
+
+model Challenge {
+  id           String          @id @default(uuid())
+  title        String          @unique
+  description  String
+  durationDays Int
+  pointsReward Int
+  category     String          // FOOD, TRANSPORT, ENERGY, WASTE
+  users        UserChallenge[]
+}
+
+model UserChallenge {
+  id          String     @id @default(uuid())
+  userId      String
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  challengeId String
+  challenge   Challenge  @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  status      String     // ACTIVE, COMPLETED, FAILED
+  startedAt   DateTime   @default(now())
+  completedAt DateTime?
+
+  @@unique([userId, challengeId])
+}
