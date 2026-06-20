@@ -4,6 +4,12 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { Leaf, BarChart3, PenTool, Award, BrainCircuit, ArrowRight, ShieldCheck, Zap, Sparkles } from 'lucide-react';
 
+/**
+ * The main landing page (Home) component for EcoTrace.
+ * Displays the hero section, core features (pillars), and call-to-actions based on session state.
+ *
+ * @returns {JSX.Element} The rendered landing page.
+ */
 export default function Home() {
   const { data: session } = useSession();
 

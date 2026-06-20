@@ -4,11 +4,19 @@ import { prisma } from '@/lib/prisma';
 import bcrypt from 'bcrypt';
 import { z } from 'zod';
 
+/**
+ * Validation schema for user login credentials.
+ * Ensures the email is properly formatted and a password is provided.
+ */
 const loginSchema = z.object({
   email: z.string().email('Invalid email format'),
   password: z.string().min(1, 'Password is required'),
 });
 
+/**
+ * NextAuth configuration options.
+ * Defines the authentication providers, JWT strategy, and session callbacks.
+ */
 export const authOptions: NextAuthOptions = {
   session: {
     strategy: 'jwt',

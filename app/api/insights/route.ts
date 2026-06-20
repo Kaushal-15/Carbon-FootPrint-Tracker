@@ -57,7 +57,12 @@ export async function GET(req: Request) {
     }
 
     // 3. Fallback static recommendation generator (if Groq fails or no key)
-    const generateFallbackRecommendations = (entries: any[]) => {
+    /**
+     * Fallback recommendations generator in case the external API fails.
+     * @param {Array<{category: string, value: number, description?: string | null}>} entries - The footprint entries.
+     * @returns {string} Formatted markdown recommendations.
+     */
+    const generateFallbackRecommendations = (entries: {category: string, value: number, description?: string | null}[]) => {
       if (entries.length === 0) {
         return "Log your daily footprint categories so EcoTrace can analyze your patterns and generate tailored insights.";
       }

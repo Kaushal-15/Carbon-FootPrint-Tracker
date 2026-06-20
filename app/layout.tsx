@@ -19,6 +19,15 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
+/**
+ * The RootLayout component serves as the top-level layout for the entire Next.js application.
+ * It wraps the application in the HTML structure, initializes fonts, sets global CSS variables,
+ * and provides necessary global contexts (like NextAuth session) via Providers.
+ *
+ * @param {Object} props - The component props.
+ * @param {React.ReactNode} props.children - The child components to render inside the layout.
+ * @returns {JSX.Element} The HTML structure of the layout.
+ */
 export default function RootLayout({
   children,
 }: Readonly<{

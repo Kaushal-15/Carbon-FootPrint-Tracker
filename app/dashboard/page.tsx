@@ -21,9 +21,23 @@ const DashboardCharts = dynamic(() => import('@/components/DashboardCharts'), {
   ),
 });
 
+/**
+ * Represents a single carbon footprint entry in the dashboard.
+ */
+interface CarbonEntry {
+  id: string;
+  category: string;
+  value: number;
+  date: string;
+  description?: string;
+}
+
+/**
+ * Interface for the aggregated dashboard data.
+ */
 interface DashboardData {
   hasData: boolean;
-  recentEntries: any[];
+  recentEntries: CarbonEntry[];
   categoryTotals: {
     transport: number;
     energy: number;
@@ -38,6 +52,12 @@ interface DashboardData {
   };
 }
 
+/**
+ * The main Dashboard component where users can view their footprint stats,
+ * charts, and AI-generated recommendations.
+ *
+ * @returns {JSX.Element | null} The rendered dashboard or null if redirecting.
+ */
 export default function Dashboard() {
   const { data: session, status } = useSession();
   const router = useRouter();
