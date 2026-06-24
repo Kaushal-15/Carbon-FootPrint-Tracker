@@ -59,10 +59,7 @@ export default function Home() {
 
       {/* Hero Section */}
       <main className="flex-1 flex flex-col justify-center items-center px-4 py-16 text-center max-w-4xl mx-auto space-y-8 relative z-10">
-        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-xs font-semibold text-emerald-400 animate-pulse">
-          <Sparkles className="h-3.5 w-3.5" />
-          <span>Hackathon Submission: EcoTrace Carbon Tracker</span>
-        </div>
+        
 
         <h1 className="text-4xl sm:text-6xl font-black tracking-tight leading-none text-white max-w-3xl">
           Empower Your Daily Flight Against{' '}
